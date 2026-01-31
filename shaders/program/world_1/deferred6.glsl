@@ -43,6 +43,7 @@ void main() {
 	float hrrZ = CT6.g;
 	vec3 diffuse = BLACK;
 	float accumSpeedPrev = 0.0;
+	float temporalSampleFactor = 1.0;
 
 	float dhTerrainHrr = 0.0;
 	float depthHrr1 = texelFetch(depthtex1, ivec2(hrrUV * viewSize), 0).r;
@@ -68,10 +69,11 @@ void main() {
 
 		#if defined COLORED_LIGHT || defined PATH_TRACING
 			diffuse.rgb = coloredLight(hrrWorldPos.xyz, hrrNormal, hrrNormalW);
+			temporalSampleFactor = coloredLightSampleFactor();
 		#endif
 
 		vec4 gi = max(vec4(diffuse, accumSpeedPrev), vec4(0.0));
-		gi = temporal_RT(gi);
+		gi = temporal_RT(gi, temporalSampleFactor);
 		gi = max(vec4(0.0), gi);
 		CT10 = gi;
 	}

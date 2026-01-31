@@ -23,6 +23,32 @@ float pdfCosineHemisphere(float cosTheta){
 }
 #ifdef COLORED_LIGHT
 #endif
+float coloredLightSampleFactor(){
+    vec4 CT4 = texelFetch(colortex4, ivec2(gl_FragCoord.xy * 2.0), 0);
+    vec4 CT5 = texelFetch(colortex5, ivec2(gl_FragCoord.xy * 2.0), 0);
+    vec4 specularMap = unpack2x16To4x8(CT4.ba);
+
+    float smoothness = specularMap.r;
+    float roughness = pow(1.0 - smoothness, 2.0);
+    float lightmapIntensity = max(CT5.b, CT5.a);
+
+    float roughnessFactor = mix(0.45, 1.0, roughness);
+    float lightmapFactor = mix(0.35, 1.0, saturate(lightmapIntensity * 1.5));
+    return clamp(roughnessFactor * lightmapFactor, 0.25, 1.0);
+}
+
+bool voxelInBoundsLod(ivec3 v, int lod) {
+    ivec3 dim = VOXEL_DIM >> lod;
+    return all(greaterThanEqual(v, ivec3(0))) &&
+           all(lessThan(v, dim));
+}
+
+float voxelAlphaMip(ivec3 v, int lod) {
+    ivec3 vLod = v >> lod;
+    if (!voxelInBoundsLod(vLod, lod)) return 1.0;
+    return texelFetch(customimg0, vLod, lod).a;
+}
+
 vec3 coloredLight(vec3 worldPos, vec3 normalV, vec3 normalW){
     vec3 tangent, bitangent;
     buildTBN(normalV, tangent, bitangent);
@@ -30,16 +56,20 @@ vec3 coloredLight(vec3 worldPos, vec3 normalV, vec3 normalW){
 
     vec3 color = vec3(0.0);
     #if PATH_TRACING_QUALITY == 0
-        const int DIR_SAMPLES = 1;
+        const int DIR_SAMPLES_MAX = 1;
     #elif PATH_TRACING_QUALITY == 1
-        const int DIR_SAMPLES = 2;
+        const int DIR_SAMPLES_MAX = 2;
     #elif PATH_TRACING_QUALITY == 2
-        const int DIR_SAMPLES = 4;
+        const int DIR_SAMPLES_MAX = 4;
     #elif PATH_TRACING_QUALITY == 3
-        const int DIR_SAMPLES = 12;
+        const int DIR_SAMPLES_MAX = 12;
     #endif
 
-    for(int i = 0; i < DIR_SAMPLES; ++i){
+    float sampleFactor = coloredLightSampleFactor();
+    int dirSamples = max(1, int(floor(float(DIR_SAMPLES_MAX) * sampleFactor + 0.5)));
+
+    for(int i = 0; i < DIR_SAMPLES_MAX; ++i){
+        if(i >= dirSamples) break;
         vec2 u = rand2_3(texcoord + sin(frameTimeCounter) + float(i) * 17.0).xy;
         vec3 localDir = sampleCosineHemisphere(u);
         vec3 refViewDir = normalize(TBN * localDir);
@@ -56,25 +86,41 @@ vec3 coloredLight(vec3 worldPos, vec3 normalV, vec3 normalW){
         
         vec3 rayOrigin = worldPos + stepVec * noise + normalW * 0.05;
         #ifndef NETHER
-            const int N_SAMPLES = 12;
+            const int N_SAMPLES_MAX = 12;
         #else
-            const int N_SAMPLES = 20;
+            const int N_SAMPLES_MAX = 20;
         #endif
+        int sampleCount = clamp(int(floor(float(N_SAMPLES_MAX) * sampleFactor + 0.5)), 4, N_SAMPLES_MAX);
 
         vec3 Li = vec3(0.0);
-        for(int j = 0; j < N_SAMPLES; ++j){
+        const int COARSE_LOD = 2;
+        const int COARSE_STRIDE = 1 << COARSE_LOD;
+        const int EMPTY_STREAK_LIMIT = 6;
+        int emptyStreak = 0;
+
+        for(int j = 0; j < N_SAMPLES_MAX; ++j){
+            if(j >= sampleCount) break;
             vec3 wp = rayOrigin + stepVec * float(j);
             ivec3 vp = relWorldToVoxelCoord(wp);
+            float coarseAlpha = voxelAlphaMip(vp, COARSE_LOD);
+            if(coarseAlpha >= 0.99){
+                emptyStreak += COARSE_STRIDE;
+                if(emptyStreak >= EMPTY_STREAK_LIMIT) break;
+                j += COARSE_STRIDE - 1;
+                continue;
+            }
             vec4 sampleCol = texelFetch(customimg0, vp.xyz, 0);
             if(sampleCol.a < 0.96){
                 Li = toLinearR(sampleCol.rgb * sampleCol.a) * 1.0;
                 break;
             }
+            emptyStreak += 1;
+            if(emptyStreak >= EMPTY_STREAK_LIMIT) break;
         }
         color += Li * (cosTheta / pdf);
     }
 
-    return color / float(DIR_SAMPLES);
+    return color / float(dirSamples);
 }
 
 vec2 SSRT_PT(vec3 viewPos, vec3 reflectViewDir, vec3 normalTex, out vec3 outMissPos){
@@ -534,7 +580,7 @@ vec3 pathTracing(vec3 viewPos, vec3 worldPos, vec3 normalV, vec3 normalW){
 
 
 
-vec4 temporal_RT(vec4 color_c){
+vec4 temporal_RT(vec4 color_c, float sampleFactor){
     vec2 uv = texcoord * 2;
     vec2 cur = texelFetch(colortex6, ivec2(gl_FragCoord.xy), 0).rg;
     float z = cur.g;
@@ -580,7 +626,8 @@ vec4 temporal_RT(vec4 color_c){
     #elif PATH_TRACING_QUALITY == 3
         float blend = 0.95;
     #endif
-    color_c = mix(color_c, c_s, w_s * blend);
+    float temporalBoost = mix(1.35, 1.0, clamp(sampleFactor, 0.0, 1.0));
+    color_c = mix(color_c, c_s, w_s * blend * temporalBoost);
 
     return color_c;
 }
