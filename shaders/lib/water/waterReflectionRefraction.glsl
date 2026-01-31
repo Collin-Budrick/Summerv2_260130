@@ -12,7 +12,11 @@ vec2 waterRefractionCoord(vec3 normalTex, vec3 worldNormal, float worldDis0, flo
 }
 #include "/lib/common/octahedralMapping.glsl"
 
-vec2 SSRT(vec3 viewPos, vec3 reflectViewDir, vec3 normalTex, out vec3 outMissPos){
+vec2 SSRT(vec3 viewPos, vec3 reflectViewDir, vec3 normalTex, float roughness, out vec3 outMissPos){
+    const float SSR_BASE_MIP = 1.0;
+    const float SSR_MAX_MIP = 6.0;
+
+    vec2 halfViewSize = viewSize * 0.5;
     float curStep = REFLECTION_STEP_SIZE;
 
     vec3 startPos = viewPos;
@@ -28,29 +32,42 @@ vec2 SSRT(vec3 viewPos, vec3 reflectViewDir, vec3 normalTex, out vec3 outMissPos
     float cumUnjittered = 0.0;
     vec3 testScreenPos = viewPosToScreenPos(vec4(startPos, 1.0)).xyz;
     vec3 preTestPos = startPos;
+    vec3 preTestScreenPos = viewPosToScreenPos(vec4(startPos, 1.0)).xyz;
     bool isHit = false;
 
     outMissPos = vec3(0.0);
 
     vec3 curTestPos = startPos;
 
+    vec3 viewDir = normalize(-viewPos);
+    float viewAngle = saturate(dot(normalTex, viewDir));
+    float roughnessFactor = mix(1.0, 0.4, roughness);
+    float viewFactor = mix(0.5, 1.0, viewAngle);
+    float distanceFactor = clamp(1.2 - worldDis / 80.0, 0.35, 1.0);
+    int dynamicSamples = int(max(4.0, float(REFLECTION_SAMPLES) * roughnessFactor * viewFactor * distanceFactor));
+
     for (int i = 0; i < int(REFLECTION_SAMPLES); ++i){
+        if (i >= dynamicSamples) break;
         cumUnjittered += curStep;
         float adjustedDist = cumUnjittered - jitter * curStep;
         curTestPos = startPos + reflectViewDir * adjustedDist;
         testScreenPos = viewPosToScreenPos(vec4(curTestPos, 1.0)).xyz;
 
-        if (outScreen(testScreenPos.xy)){
+        if (outScreen(testScreenPos.xy) || testScreenPos.z <= 0.0 || testScreenPos.z >= 1.0){
             outMissPos = preTestPos;
             return vec2(-1.0);
         }
 
-        float closest = texture(depthtex1, testScreenPos.xy).r;
+        vec2 screenStep = abs(testScreenPos.xy - preTestScreenPos.xy) * halfViewSize;
+        float maxStep = max(screenStep.x, screenStep.y);
+        float lod = clamp(log2(max(maxStep, 1.0)), 0.0, SSR_MAX_MIP) + SSR_BASE_MIP;
+
+        float closest = textureLod(depthtex1, testScreenPos.xy, lod).r;
         #if defined DISTANT_HORIZONS && !defined NETHER && !defined END
             #ifdef GBF
-                float dhDepth = texture(dhDepthTex1, testScreenPos.xy).r;
+                float dhDepth = textureLod(dhDepthTex1, testScreenPos.xy, lod).r;
             #else
-                float dhDepth = texture(dhDepthTex0, testScreenPos.xy).r;
+                float dhDepth = textureLod(dhDepthTex0, testScreenPos.xy, lod).r;
             #endif
             vec4 dhViewPos = screenPosToViewPosDH(vec4(testScreenPos.xy, dhDepth, 1.0));
             closest = min(closest, viewPosToScreenPos(dhViewPos).z);
@@ -67,12 +84,12 @@ vec2 SSRT(vec3 viewPos, vec3 reflectViewDir, vec3 normalTex, out vec3 outMissPos
                 float n = pow(0.5, float(j));
                 probePos = probePos + sig * n * ds;
                 testScreenPos = viewPosToScreenPos(vec4(probePos, 1.0)).xyz;
-                closestB = texture(depthtex1, testScreenPos.xy).r;
+                closestB = textureLod(depthtex1, testScreenPos.xy, SSR_BASE_MIP).r;
                 #if defined DISTANT_HORIZONS && !defined NETHER && !defined END
                     #ifdef GBF
-                        float dhDepthB = texture(dhDepthTex1, testScreenPos.xy).r;
+                        float dhDepthB = textureLod(dhDepthTex1, testScreenPos.xy, SSR_BASE_MIP).r;
                     #else
-                        float dhDepthB = texture(dhDepthTex0, testScreenPos.xy).r;
+                        float dhDepthB = textureLod(dhDepthTex0, testScreenPos.xy, SSR_BASE_MIP).r;
                     #endif
                     vec4 dhViewPosB = screenPosToViewPosDH(vec4(testScreenPos.xy, dhDepthB, 1.0));
                     closestB = min(closestB, viewPosToScreenPos(dhViewPosB).z);
@@ -92,15 +109,16 @@ vec2 SSRT(vec3 viewPos, vec3 reflectViewDir, vec3 normalTex, out vec3 outMissPos
         }
 
         preTestPos = curTestPos;
+        preTestScreenPos = testScreenPos;
         curStep *= REFLECTION_STEP_GROWTH_BASE;
     }
 
     bool depthCondition = true;
     // #if !defined END && !defined NETHER
         #ifdef DISTANT_HORIZONS
-            depthCondition = texture(dhDepthTex0, testScreenPos.xy).r < 1.0 || texture(depthtex1, testScreenPos.xy).r < 1.0;
+            depthCondition = textureLod(dhDepthTex0, testScreenPos.xy, SSR_BASE_MIP).r < 1.0 || textureLod(depthtex1, testScreenPos.xy, SSR_BASE_MIP).r < 1.0;
         #else
-            depthCondition = texture(depthtex1, testScreenPos.xy).r < 1.0;
+            depthCondition = textureLod(depthtex1, testScreenPos.xy, SSR_BASE_MIP).r < 1.0;
         #endif
     // #endif
 
@@ -136,14 +154,14 @@ vec3 reflection(sampler2D tex, vec3 viewPos, vec3 reflectWorldDir, vec3 reflectV
 
     vec3 missPos = vec3(0.0);
 
-    vec2 testScreenPos = SSRT(viewPos, reflectViewDir, normalTex, missPos);
+    vec2 testScreenPos = SSRT(viewPos, reflectViewDir, normalTex, clamp(roughness, 0.0, 1.0), missPos);
     vec2 velocity = texture(colortex9, testScreenPos.xy).xy;
     testScreenPos.xy = testScreenPos.xy - velocity;
 
     if(testScreenPos.x >= 0.0){
         ssrTargetSampled = true;
         
-        reflectColor = texture(tex, testScreenPos.xy).rgb * colorScale;
+        reflectColor = textureLod(tex, testScreenPos.xy, 1.0).rgb * colorScale;
     }else{
         #ifdef PATH_TRACING_REFLECTION
         #endif
@@ -202,6 +220,8 @@ vec3 temporal_Reflection(vec3 color_c, int samples, float r){
     vec4 viewPos = screenPosToViewPos(screenPos);
     vec4 worldPos = viewPosToWorldPos(viewPos);
     vec3 prePos = getPrePos(worldPos);
+    vec2 velocity = texture(colortex9, texcoord).xy;
+    prePos.xy = prePos.xy - velocity;
 
     prePos.xy = (prePos.xy * 0.5 + 0.5) * viewSize - vec2(0.5);
     vec2 fPrePos = floor(prePos.xy);
