@@ -109,6 +109,43 @@ float computeLightPathOpticalDepth(vec3 currentPos, vec3 lightWorldDir, float in
     return opticalDepth;
 }
 
+float computeLightPathOpticalDepthCached(
+    vec3 currentPos,
+    vec3 lightWorldDir,
+    float initialStepSize,
+    int N_SAMPLES,
+    inout float cachedDepth,
+    inout vec3 cachedPos
+) {
+    float reuseRadius = initialStepSize * 3.0;
+    if(cachedDepth >= 0.0 && length(currentPos - cachedPos) < reuseRadius){
+        return cachedDepth;
+    }
+
+    int steps = max(1, N_SAMPLES / 2);
+    float opticalDepth = 0.0;
+    bool doCheaply = false;
+    float prevDensity = sampleCloudDensity(currentPos, doCheaply);
+    float currentStepSize = initialStepSize;
+
+    for (int i = 1; i <= steps; i++) {
+        float t = float(i) / float(steps);
+        currentStepSize = mix(initialStepSize, initialStepSize * 6.0, t);
+        currentPos += lightWorldDir * currentStepSize;
+
+        if(i > 0.5 * steps) doCheaply = true;
+        float currentDensity = sampleCloudDensity(currentPos, doCheaply);
+        opticalDepth += 0.5 * (prevDensity + currentDensity) * currentStepSize;
+        prevDensity = currentDensity;
+
+        if(opticalDepth > 6.0) break;
+    }
+
+    cachedDepth = opticalDepth;
+    cachedPos = currentPos;
+    return opticalDepth;
+}
+
 float GetInScatterProbability(float height_fraction, float ds_loded, float attenuation, float VoL){
     attenuation = saturate(mix(attenuation, 1.0, sunRiseSet));
     ds_loded = saturate(ds_loded);
@@ -128,14 +165,23 @@ float GetDirectScatterProbability(float CosTheta, float eccentricity, float silv
     return max(hgPhase1(CosTheta, eccentricity), silverIntensity * hgPhase1(CosTheta, (0.99 - silverSpread)));
 }
 
-vec3 sunLuminance(vec3 pos, float VoL, float iVoL, float extinction){
+vec3 sunLuminance(
+    vec3 pos,
+    float VoL,
+    float iVoL,
+    float extinction,
+    inout float cachedLightDepth,
+    inout vec3 cachedLightPos,
+    inout float cachedUpDepth,
+    inout vec3 cachedUpPos
+){
     float density = extinction / CLOUD_SIGMA_S;
     float height_fraction = getHeightFractionForPoint(pos.y, cloudHeight);
     
-    float lightPathOpticalDepth = computeLightPathOpticalDepth(pos, lightWorldDir, 10.0, 4);
+    float lightPathOpticalDepth = computeLightPathOpticalDepthCached(pos, lightWorldDir, 10.0, 4, cachedLightDepth, cachedLightPos);
     float attenuation = GetAttenuationProbability(lightPathOpticalDepth, saturate(VoL), 0.7, 0.7, 0.15 + 0.15 * sunRiseSetS, 0.75);
 
-    float upPathOpticalDepth = computeLightPathOpticalDepth(pos, upWorldDir, 10.0, 2);
+    float upPathOpticalDepth = computeLightPathOpticalDepthCached(pos, upWorldDir, 10.0, 2, cachedUpDepth, cachedUpPos);
     float upAttenuation = GetAttenuationProbability(upPathOpticalDepth, 0.15, 0.7);
     attenuation += 0.15 * upAttenuation * isNoonS;
 
@@ -183,9 +229,14 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
     #endif
 
     float rayLength = stepDis.y;
+    float distanceFactor = saturate(rayLength / CLOUD_MAX_DISTANCE);
+    float coverageFactor = saturate(1.0 - CLOUD_COVERAGE);
+    float coarseScale = mix(1.0, 0.55, distanceFactor) * mix(1.0, 0.75, coverageFactor);
+    N_COARSE = max(1, int(float(N_COARSE) * coarseScale));
     float coarseStep = rayLength / float(max(N_COARSE, 1));
     const float SMALL_STEP_FACTOR = 1.0 / CLOUD_SMALL_STEP;
-    float smallStep = coarseStep * SMALL_STEP_FACTOR;
+    float smallStepScale = mix(1.0, 1.6, distanceFactor) * mix(1.0, 1.2, coverageFactor);
+    float smallStep = coarseStep * SMALL_STEP_FACTOR * smallStepScale;
 
     vec3 oriStartPos = startPos;
     startPos += worldDir * stepDis.x;
@@ -200,13 +251,21 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
     const int FINE_MISS_LIMIT = int(CLOUD_SMALL_STEP) + 1;              // 小步内连续多少次未命中则回到粗步
     const int MAX_FINE_STEPS_PER_DETECTION = 48;// 单次进入精细区域样本上限（防止爆炸）
     const int MAX_TOTAL_STEPS = 256;            // 全过程样本上限（总预算保护）
+    const float TRANSMIT_EPSILON = 0.0025;      // 透射率过低提前退出
+    const int LOW_DENSITY_LIMIT = 10;           // 连续低密度步数上限
 
     float traveled = 0.0;
     int totalSteps = 0;
+    int lowDensitySteps = 0;
+
+    float cachedLightDepth = -1.0;
+    vec3 cachedLightPos = vec3(0.0);
+    float cachedUpDepth = -1.0;
+    vec3 cachedUpPos = vec3(0.0);
 
     while(traveled < rayLength){
         if(stepDis.x + traveled > CLOUD_MAX_DISTANCE) break;
-        if(intScattTrans.a < 0.01) break;
+        if(intScattTrans.a < TRANSMIT_EPSILON) break;
         if(totalSteps++ > MAX_TOTAL_STEPS) break;
 
         vec3 coarsePos = startPos + traveled * worldDir;
@@ -214,13 +273,14 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
 
         if(lowDens > COARSE_DETECT_THRESHOLD){
             traveled = max(0.0, traveled - coarseStep);
+            lowDensitySteps = 0;
 
             int fineMisses = 0;
             int fineSteps = 0;
 
             while(traveled < rayLength){
                 if(stepDis.x + traveled > CLOUD_MAX_DISTANCE) break;
-                if(intScattTrans.a < 0.01) break;
+                if(intScattTrans.a < TRANSMIT_EPSILON) break;
                 if(fineSteps++ > MAX_FINE_STEPS_PER_DETECTION) break;
                 if(totalSteps++ > MAX_TOTAL_STEPS) break;
 
@@ -234,15 +294,21 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
                     }
                     float opticalDepth = smallStep * ext;
                     float transmittance = GetAttenuationProbability(opticalDepth);
-                    vec3 luminance = sunLuminance(pos, VoL, iVoL, ext);
+                    vec3 luminance = sunLuminance(pos, VoL, iVoL, ext, cachedLightDepth, cachedLightPos, cachedUpDepth, cachedUpPos);
 
                     intScattTrans.rgb += intScattTrans.a * (luminance - luminance * transmittance) / max(ext, 1e-5);
                     intScattTrans.a *= transmittance;
 
                     fineMisses = 0;
+                    lowDensitySteps = 0;
                 }else{
                     fineMisses++;
+                    lowDensitySteps++;
                     if(fineMisses >= FINE_MISS_LIMIT){
+                        traveled += smallStep;
+                        break;
+                    }
+                    if(lowDensitySteps >= LOW_DENSITY_LIMIT){
                         traveled += smallStep;
                         break;
                     }
@@ -252,6 +318,10 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
             }
         }else{
             traveled += coarseStep;
+            lowDensitySteps++;
+            if(lowDensitySteps >= LOW_DENSITY_LIMIT){
+                break;
+            }
         }
     }
 
@@ -267,6 +337,12 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
 #endif
 
 vec4 temporal_cloud3D(vec4 color_c){
+    vec2 viewPixel = texcoord * viewSize;
+    vec2 lowResCoord = floor(viewPixel * 0.5);
+    vec2 lowResBase = lowResCoord * 2.0 + vec2(0.5);
+    vec2 lowResUV = lowResBase * invViewSize;
+    vec4 lowResSample = texture(colortex3, lowResUV);
+
     vec2 uv = texcoord * 2 - vec2(1.0, 0.0);
     float z = 1.0;
     vec3 prePos = getPrePos(viewPosToWorldPos(screenPosToViewPos(vec4(uv, z, 1.0))));
@@ -276,6 +352,7 @@ vec4 temporal_cloud3D(vec4 color_c){
 
     vec4 c_s = vec4(0.0);
     float w_s = 0.0;
+    float currentDepth = texture(colortex6, texcoord).g;
 
     for(int i = 0; i <= 1; i++){
     for(int j = 0; j <= 1; j++){
@@ -292,7 +369,8 @@ vec4 temporal_cloud3D(vec4 color_c){
         vec4 pre = texelFetch(colortex6, ivec2(curUV + vec2(0.0, 0.5) * viewSize), 0);
 
         float zc = pre.g;
-        weight *= pre.g < 1.0 ? 0.1 : 1.0;
+        float depthWeight = 1.0 - saturate(abs(zc - currentDepth) * 25.0);
+        weight *= (pre.g < 1.0 ? 0.1 : 1.0) * depthWeight;
 
         c_s += cc * weight;
         w_s += weight;
@@ -300,7 +378,9 @@ vec4 temporal_cloud3D(vec4 color_c){
     }
 
     vec4 blend = vec4(0.9);
-    color_c = mix(color_c, c_s, w_s * blend);
+    vec4 reprojection = mix(color_c, c_s, w_s * blend);
+    vec4 lowResBlend = mix(reprojection, lowResSample, 0.35);
+    color_c = mix(reprojection, lowResBlend, 1.0);
 
     return color_c;
 }
