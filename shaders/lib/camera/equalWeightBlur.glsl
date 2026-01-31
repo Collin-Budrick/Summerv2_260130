@@ -10,8 +10,12 @@ vec4 EqualWeightSeparableBlur(
     float normalThreshold,
     float depthThreshold)
 {
-    int steps = int(ceil(max(1.0, quality)));
-    float stepPx = 2.0 * radius / float(steps);
+    const int MAX_TAPS = 4;
+    const float gaussianWeights[5] = float[](
+        0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216
+    );
+    int taps = int(clamp(floor(quality), 1.0, float(MAX_TAPS)));
+    float stepPx = radius / float(MAX_TAPS);
 
     vec4 cSum = vec4(0.0);
     float wSum = 0.0;
@@ -25,9 +29,14 @@ vec4 EqualWeightSeparableBlur(
         centerZ = linearizeDepth(texture(depthTex, uv).r);
     }
 
-    for (int i = 0; i <= steps; ++i) {
-        float offsetPx = -radius + float(i) * stepPx;
-        vec2 sampleUV = uv + dir * (offsetPx * invViewSize);
+    vec2 baseStep = dir * (stepPx * invViewSize);
+    for (int i = 0; i <= MAX_TAPS; ++i) {
+        if (i > taps) {
+            continue;
+        }
+        float weight = gaussianWeights[i];
+        vec2 offset = baseStep * float(i);
+        vec2 sampleUV = uv + offset;
 
         if (outScreen(sampleUV)) continue;
 
@@ -46,8 +55,33 @@ vec4 EqualWeightSeparableBlur(
         if (w <= 1e-5) continue;
 
         vec4 col = texture(colorTex, sampleUV);
-        cSum += col * w;
-        wSum += w;
+        float finalWeight = weight * w;
+        cSum += col * finalWeight;
+        wSum += finalWeight;
+
+        if (i > 0) {
+            vec2 sampleUVNeg = uv - offset;
+            if (!outScreen(sampleUVNeg)) {
+                float wNeg = 1.0;
+                if (useNormal) {
+                    vec3 n = normalize(getNormal(sampleUVNeg));
+                    float wN = saturate(dot(n, centerN) * normalThreshold); 
+                    wNeg *= wN;
+                }
+                if (useDepth) {
+                    float z = linearizeDepth(texture(depthTex, sampleUVNeg).r);
+                    float wZ = saturate(1.2 - abs(z - centerZ) * depthThreshold); 
+                    wNeg *= wZ;
+                }
+
+                if (wNeg > 1e-5) {
+                    vec4 colNeg = texture(colorTex, sampleUVNeg);
+                    float finalWeightNeg = weight * wNeg;
+                    cSum += colNeg * finalWeightNeg;
+                    wSum += finalWeightNeg;
+                }
+            }
+        }
     }
 
     if (wSum <= 1e-5) {
