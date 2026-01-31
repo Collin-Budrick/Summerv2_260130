@@ -66,7 +66,7 @@ void main() {
 				float sampleLightmapY = lightmap.y * smoothstep(-1.0, 1.0, NdotU);
 
 				bool ssrTargetSampled = false;
-				vec3 sampleColor = reflection(colortex2, hrrViewPos.xyz, sampleReflectWorldDir, sampleReflectViewDir, sampleLightmapY, hrrNormalVO, 1.0, ssrTargetSampled);
+				vec3 sampleColor = reflection(colortex2, hrrViewPos.xyz, sampleReflectWorldDir, sampleReflectViewDir, sampleLightmapY, hrrNormalVO, r, 1.0, ssrTargetSampled);
 				sampleColor = clamp(sampleColor, 0.001, 10.0);
 				accumulatedReflectColor += sampleColor;
 			}

@@ -172,6 +172,7 @@ void main() {
 		
 		float cosTheta = dot(-worldDir, waveWorldNormal);
 		float fresnel = mix(pow(1.0 - saturate(cosTheta), REFLECTION_FRESNAL_POWER), 1.0, WATER_F0);
+		float waterRoughness = 0.02;
 
 		#ifdef WATER_REFLECTION
 			vec3 reflectColor = reflection(
@@ -181,6 +182,7 @@ void main() {
 				reflectViewDir, 
 				lightmapY * underwaterFactor, 
 				normalVO, 
+				waterRoughness,
 				1.0, 
 				ssrTargetSampled
 			);
@@ -297,7 +299,7 @@ void main() {
 			float upDirFactor = smoothstep(-1.0, 0.0, NdotU);
 			bool ssrTargetSampled = false;	
 			vec3 reflectColor = reflection(gaux2, vViewPos.xyz, reflectWorldDir, reflectViewDir, 
-											lightmap.y * upDirFactor, normalTexV, 1.0, ssrTargetSampled)
+											lightmap.y * upDirFactor, normalTexV, materialParams.roughness, 1.0, ssrTargetSampled)
 											+ drawCelestial(reflectWorldDir, 1.0, false) * shade;
 			float NdotV = saturate(dot(normalTexV, -viewDir));
 

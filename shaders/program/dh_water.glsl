@@ -103,6 +103,7 @@ void main() {
 		
 		float cosTheta = dot(-worldDir, waveWorldNormal);
 		float fresnel = mix(pow(1.0 - saturate(cosTheta), REFLECTION_FRESNAL_POWER), 1.0, WATER_F0);
+		float waterRoughness = 0.02;
 
 		#ifdef WATER_REFLECTION
 			vec3 reflectColor = reflection(
@@ -112,6 +113,7 @@ void main() {
 				reflectViewDir, 
 				lightmapY * underwaterFactor, 
 				normalVO, 
+				waterRoughness,
 				1.0, 
 				ssrTargetSampled
 			);

@@ -337,12 +337,6 @@ void cloudRayMarching(vec3 startPos, vec3 worldPos, inout vec4 intScattTrans, in
 #endif
 
 vec4 temporal_cloud3D(vec4 color_c){
-    vec2 viewPixel = texcoord * viewSize;
-    vec2 lowResCoord = floor(viewPixel * 0.5);
-    vec2 lowResBase = lowResCoord * 2.0 + vec2(0.5);
-    vec2 lowResUV = lowResBase * invViewSize;
-    vec4 lowResSample = texture(colortex3, lowResUV);
-
     vec2 uv = texcoord * 2 - vec2(1.0, 0.0);
     float z = 1.0;
     vec3 prePos = getPrePos(viewPosToWorldPos(screenPosToViewPos(vec4(uv, z, 1.0))));
@@ -352,7 +346,6 @@ vec4 temporal_cloud3D(vec4 color_c){
 
     vec4 c_s = vec4(0.0);
     float w_s = 0.0;
-    float currentDepth = texture(colortex6, texcoord).g;
 
     for(int i = 0; i <= 1; i++){
     for(int j = 0; j <= 1; j++){
@@ -368,19 +361,17 @@ vec4 temporal_cloud3D(vec4 color_c){
 
         vec4 pre = texelFetch(colortex6, ivec2(curUV + vec2(0.0, 0.5) * viewSize), 0);
 
-        float zc = pre.g;
-        float depthWeight = 1.0 - saturate(abs(zc - currentDepth) * 25.0);
-        weight *= (pre.g < 1.0 ? 0.1 : 1.0) * depthWeight;
+        weight *= pre.g < 1.0 ? 0.1 : 1.0;
 
         c_s += cc * weight;
         w_s += weight;
     }
     }
 
-    vec4 blend = vec4(0.9);
-    vec4 reprojection = mix(color_c, c_s, w_s * blend);
-    vec4 lowResBlend = mix(reprojection, lowResSample, 0.35);
-    color_c = mix(reprojection, lowResBlend, 1.0);
+    float cameraMove = length(cameraPosition - previousCameraPosition);
+    float cameraWeight = clamp(1.0 - cameraMove * 3.0, 0.0, 1.0);
+    vec4 blend = vec4(0.9 * cameraWeight);
+    color_c = mix(color_c, c_s, w_s * blend);
 
     return color_c;
 }
