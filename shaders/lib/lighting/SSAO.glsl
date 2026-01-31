@@ -1,19 +1,41 @@
-float SSAO(vec3 viewPos, vec3 normal){
-    float noise = rand2_1(texcoord + sin(frameTimeCounter));
-    vec3 randomVec = rand2_3(texcoord + sin(frameTimeCounter)) * 2.0 - 1.0;
+#ifndef AO_HALF_RES
+#define AO_HALF_RES 1
+#endif
+
+#ifndef GTAO_QUALITY_HIGH
+#define GTAO_QUALITY_HIGH 1
+#endif
+
+float getAoDepth(vec2 uv){
+    return linearizeDepth(texture(depthtex2, uv).r);
+}
+
+vec2 getAoVelocity(vec2 uv){
+#if !defined GBF && !defined SHD
+    return texture(colortex9, uv).rg;
+#else
+    return vec2(0.0);
+#endif
+}
+
+float SSAO_Core(vec2 uv, vec3 viewPos, vec3 normal, float sampleScale){
+    float noise = rand2_1(uv + sin(frameTimeCounter));
+    vec3 randomVec = rand2_3(uv + sin(frameTimeCounter)) * 2.0 - 1.0;
 
     vec3 tangent = normalize(randomVec - normal * dot(randomVec, normal));
     vec3 bitangent = normalize(cross(normal, tangent));
     mat3 TBN = mat3(tangent, bitangent, normal);
 
-    float N_SAMPLES = remapSaturate(length(viewPos), 0.0, 120.0, SSAO_MAX_SAMPLES, SSAO_MIN_SAMPLES);
+    float baseSamples = remapSaturate(length(viewPos), 0.0, 120.0, SSAO_MAX_SAMPLES, SSAO_MIN_SAMPLES);
+    float N_SAMPLES = clamp(baseSamples * sampleScale, 2.0, SSAO_MAX_SAMPLES);
+    int sampleCount = max(1, int(floor(N_SAMPLES + 0.5)));
     const float radius = SSAO_SEARCH_RADIUS;
 
     float ao = 0.0;
-    for(int i = 0; i < N_SAMPLES; ++i){
-        vec3 offset = rand2_3(texcoord + sin(frameTimeCounter) + i);
+    for(int i = 0; i < sampleCount; ++i){
+        vec3 offset = rand2_3(uv + sin(frameTimeCounter) + i + noise);
         offset.xy = offset.xy * 2.0 - 1.0;
-            float scale = float(i) / N_SAMPLES;
+            float scale = float(i) / float(sampleCount);
             scale = lerp(0.1, 1.0, scale * scale);
             offset *= scale;
         offset = TBN * offset;
@@ -40,7 +62,7 @@ float SSAO(vec3 viewPos, vec3 normal){
         ao += (1.0 - nowAO);
     }
 
-    ao /= N_SAMPLES;
+    ao /= float(sampleCount);
     ao = pow(ao, SSAO_INTENSITY);
     return saturate(ao);
 }
@@ -82,11 +104,11 @@ float HBAO(vec3 viewPos, vec3 normal){
 
 // Practical Real-Time Strategies for Accurate Indirect Occlusion
 // https://www.activision.com/cdn/research/Practical_Real_Time_Strategies_for_Accurate_Indirect_Occlusion_NEW%20VERSION_COLOR.pdf
-float GTAO(vec3 viewPos, vec3 normal, float dhTerrain){
+float GTAO_Core(vec2 uv, vec3 viewPos, vec3 normal, float dhTerrain, float sampleScale){
     float rand = temporalBayer64(gl_FragCoord.xy);
     float dist = length(viewPos);
-    const int sliceCount = GTAO_SLICE_COUNT;
-    const int directionSampleCount = GTAO_DIRECTION_SAMPLE_COUNT;
+    int sliceCount = max(1, int(floor(float(GTAO_SLICE_COUNT) * sampleScale + 0.5)));
+    int directionSampleCount = max(1, int(floor(float(GTAO_DIRECTION_SAMPLE_COUNT) * sampleScale + 0.5)));
     float scaling = GTAO_SEARCH_RADIUS / dist;
     
     float visibility = 0.0;
@@ -113,7 +135,7 @@ float GTAO(vec3 viewPos, vec3 normal, float dhTerrain){
                 float s = (float(samples) + 0.1 + rand) / float(directionSampleCount);
                 
                 vec2 offset = (2.0 * float(side) - 1.0) * s * scaling * omega;
-                vec2 sampleUV = texcoord * 2.0 + offset;
+                vec2 sampleUV = uv * 2.0 + offset;
                 if(outScreen(sampleUV))
                     continue;
                 
@@ -140,6 +162,106 @@ float GTAO(vec3 viewPos, vec3 normal, float dhTerrain){
     }
     visibility /= float(sliceCount);
     return pow(visibility, GTAO_INTENSITY);
+}
+
+float AOHistoryBlend(vec2 uv, vec3 normal, float depth, float ao){
+    vec2 velocity = getAoVelocity(uv);
+    vec2 prevUV = uv - velocity;
+    if(outScreen(prevUV))
+        return ao;
+
+    float prevDepth = getAoDepth(prevUV);
+    vec3 prevNormal = getNormal(prevUV);
+
+    float depthDiff = abs(prevDepth - depth) / max(depth, 0.001);
+    float normalMatch = pow(saturate(dot(normal, prevNormal)), 4.0);
+    float motionPixels = length(velocity * viewSize);
+    float stability = exp(-depthDiff * 40.0) * normalMatch * saturate(1.0 - motionPixels * 0.2);
+
+    float history = texture(colortex3, prevUV).a;
+    float blend = saturate(stability * 0.8);
+    return mix(ao, history, blend);
+}
+
+float computeAOSampleScale(vec3 viewPos, vec3 normal){
+    float dist = length(viewPos);
+    float depthFactor = remapSaturate(dist, 20.0, 120.0, 0.0, 1.0);
+    float normalVariance = saturate(length(fwidth(normal)) * 3.0);
+    return mix(1.0, 0.6, depthFactor) * mix(1.0, 0.7, normalVariance);
+}
+
+float computeAOAtUV(vec2 uv, vec3 viewPos, vec3 normal, float dhTerrain, bool useGTAO){
+    float sampleScale = computeAOSampleScale(viewPos, normal);
+    if(useGTAO){
+        return GTAO_Core(uv, viewPos, normal, dhTerrain, sampleScale);
+    }
+    return SSAO_Core(uv, viewPos, normal, sampleScale * 0.8);
+}
+
+float computeAOHalfRes(vec3 viewPos, vec3 normal, float dhTerrain, bool useGTAO){
+    vec2 halfPixel = invViewSize * 2.0;
+    vec2 halfBase = (floor(texcoord / halfPixel) + vec2(0.5)) * halfPixel;
+    float depthCenter = getAoDepth(texcoord);
+
+    float aoSum = 0.0;
+    float wSum = 0.0;
+    for(int y = 0; y <= 1; ++y){
+        for(int x = 0; x <= 1; ++x){
+            vec2 sampleUV = halfBase + vec2(float(x), float(y)) * halfPixel;
+            if(outScreen(sampleUV))
+                continue;
+
+            float sampleDepthRaw = texture(depthtex2, sampleUV).r;
+            vec3 sampleViewPos = screenPosToViewPos(vec4(sampleUV, sampleDepthRaw, 1.0)).xyz;
+            vec3 sampleNormal = getNormal(sampleUV);
+            float sampleAO = computeAOAtUV(sampleUV, sampleViewPos, sampleNormal, dhTerrain, useGTAO);
+
+            float sampleDepth = linearizeDepth(sampleDepthRaw);
+            float depthWeight = exp(-abs(sampleDepth - depthCenter) * 4.0);
+            float normalWeight = pow(saturate(dot(normal, sampleNormal)), 8.0);
+            float weight = depthWeight * normalWeight;
+
+            aoSum += sampleAO * weight;
+            wSum += weight;
+        }
+    }
+
+    if(wSum > 0.0)
+        return aoSum / wSum;
+
+    return computeAOAtUV(texcoord, viewPos, normal, dhTerrain, useGTAO);
+}
+
+float SSAO(vec3 viewPos, vec3 normal, float dhTerrain){
+    float ao = 1.0;
+#if AO_HALF_RES > 0
+    ao = computeAOHalfRes(viewPos, normal, dhTerrain, false);
+#else
+    ao = computeAOAtUV(texcoord, viewPos, normal, dhTerrain, false);
+#endif
+
+    float depth = getAoDepth(texcoord);
+    return AOHistoryBlend(texcoord, normal, depth, ao);
+}
+
+float GTAO(vec3 viewPos, vec3 normal, float dhTerrain){
+    float depth = getAoDepth(texcoord);
+    float normalVariance = saturate(length(fwidth(normal)) * 3.0);
+    float motionPixels = length(getAoVelocity(texcoord) * viewSize);
+    float discontinuity = saturate(fwidth(depth) * 50.0 + normalVariance);
+
+    bool useGTAO = (GTAO_QUALITY_HIGH > 0)
+        && (motionPixels < 2.5)
+        && (discontinuity < 0.7);
+
+    float ao = 1.0;
+#if AO_HALF_RES > 0
+    ao = computeAOHalfRes(viewPos, normal, dhTerrain, useGTAO);
+#else
+    ao = computeAOAtUV(texcoord, viewPos, normal, dhTerrain, useGTAO);
+#endif
+
+    return AOHistoryBlend(texcoord, normal, depth, ao);
 }
 
 vec3 AOMultiBounce(vec3 BaseColor, float ao){
