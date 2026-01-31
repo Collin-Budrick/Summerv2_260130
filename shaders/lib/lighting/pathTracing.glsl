@@ -1,6 +1,18 @@
 #ifdef FSH
 #include "/lib/lighting/voxelization.glsl"
 
+#ifdef GBF
+#define PT_TEX4 gaux1
+#define PT_TEX5 gaux2
+#define PT_TEX6 gaux3
+#define PT_TEX7 gaux4
+#else
+#define PT_TEX4 colortex4
+#define PT_TEX5 colortex5
+#define PT_TEX6 colortex6
+#define PT_TEX7 colortex7
+#endif
+
 void buildTBN(in vec3 n, out vec3 t, out vec3 b){
     vec3 up = (abs(n.z) < 0.999) ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     t = normalize(cross(up, n));
@@ -24,8 +36,8 @@ float pdfCosineHemisphere(float cosTheta){
 #ifdef COLORED_LIGHT
 #endif
 float coloredLightSampleFactor(){
-    vec4 CT4 = texelFetch(colortex4, ivec2(gl_FragCoord.xy * 2.0), 0);
-    vec4 CT5 = texelFetch(colortex5, ivec2(gl_FragCoord.xy * 2.0), 0);
+    vec4 CT4 = texelFetch(PT_TEX4, ivec2(gl_FragCoord.xy * 2.0), 0);
+    vec4 CT5 = texelFetch(PT_TEX5, ivec2(gl_FragCoord.xy * 2.0), 0);
     vec4 specularMap = unpack2x16To4x8(CT4.ba);
 
     float smoothness = specularMap.r;
@@ -507,8 +519,8 @@ vec3 pathTracing(vec3 viewPos, vec3 worldPos, vec3 normalV, vec3 normalW){
             vec3 hitAlbedo  = pow(hitCol, vec3(2.2));
             vec3 hitDiffuse = hitAlbedo / PI;
 
-            vec4 CT4 = texelFetch(colortex4, ivec2(ssrHitPos * viewSize), 0);
-            vec4 CT5 = texelFetch(colortex5, ivec2(ssrHitPos * viewSize), 0);
+            vec4 CT4 = texelFetch(PT_TEX4, ivec2(ssrHitPos * viewSize), 0);
+            vec4 CT5 = texelFetch(PT_TEX5, ivec2(ssrHitPos * viewSize), 0);
 
             vec2 CT4R = unpack16To2x8(CT4.r);
             vec3 hitNormalV = normalize(normalDecode(CT5.rg));
@@ -538,11 +550,11 @@ vec3 pathTracing(vec3 viewPos, vec3 worldPos, vec3 normalV, vec3 normalW){
 
             if(!vxHit){
                 vec3 skyColor = texture(
-                    colortex7,
+                    PT_TEX7,
                     clamp(directionToOctahedral(refWorldDir) * 0.5, 0.0, 0.5 - 1.0 / 512.0)
                 ).rgb;
 
-                vec4 CT5 = texelFetch(colortex5, ivec2(gl_FragCoord.xy * 2.0), 0);
+                vec4 CT5 = texelFetch(PT_TEX5, ivec2(gl_FragCoord.xy * 2.0), 0);
                 vec2 mcLightmap = CT5.ba;
 
                 float xFade = remapSaturate(abs(worldPos.x), 100.0, 128.0, 1.0, 0.33 * mcLightmap.y);
@@ -582,7 +594,7 @@ vec3 pathTracing(vec3 viewPos, vec3 worldPos, vec3 normalV, vec3 normalW){
 
 vec4 temporal_RT(vec4 color_c, float sampleFactor){
     vec2 uv = texcoord * 2;
-    vec2 cur = texelFetch(colortex6, ivec2(gl_FragCoord.xy), 0).rg;
+    vec2 cur = texelFetch(PT_TEX6, ivec2(gl_FragCoord.xy), 0).rg;
     float z = cur.g;
     vec4 viewPos = screenPosToViewPos(vec4(uv, z, 1.0));
     vec3 prePos = getPrePos(viewPosToWorldPos(viewPos));
@@ -602,7 +614,7 @@ vec4 temporal_RT(vec4 color_c, float sampleFactor){
         vec2 curUV = fPrePos + vec2(i, j);
         if(outScreen(curUV * 2 * invViewSize)) continue;
 
-        vec2 pre = texelFetch(colortex6, ivec2(curUV + 0.5 * viewSize), 0).rg;
+        vec2 pre = texelFetch(PT_TEX6, ivec2(curUV + 0.5 * viewSize), 0).rg;
         float depth_p = linearizeDepth(pre.g);   
 
         float weight = (1.0 - abs(prePos.x - curUV.x)) * (1.0 - abs(prePos.y - curUV.y));
@@ -651,7 +663,7 @@ vec4 JointBilateralFiltering_PT_Horizontal(){
     // return texelFetch(colortex10, ivec2(gl_FragCoord.xy), 0);
     
     ivec2 pix = ivec2(gl_FragCoord.xy);
-    vec2 curGD = texelFetch(colortex6, pix, 0).rg;
+    vec2 curGD = texelFetch(PT_TEX6, pix, 0).rg;
     vec3  normal0 = unpackNormal(curGD.r);
     float z0      = linearizeDepth(curGD.g);
 
@@ -668,7 +680,7 @@ vec4 JointBilateralFiltering_PT_Horizontal(){
 
         if (outScreen(vec2(p) * 2.0 * invViewSize)) continue;
 
-        vec2 gd = texelFetch(colortex6, p, 0).rg;
+        vec2 gd = texelFetch(PT_TEX6, p, 0).rg;
         vec3  n  = unpackNormal(gd.r);
         float z  = linearizeDepth(gd.g);
 
@@ -689,7 +701,7 @@ vec4 JointBilateralFiltering_PT_Vertical(){
     // return texelFetch(colortex11, ivec2(gl_FragCoord.xy), 0);
 
     ivec2 pix = ivec2(gl_FragCoord.xy);
-    vec2 curGD = texelFetch(colortex6, pix, 0).rg;
+    vec2 curGD = texelFetch(PT_TEX6, pix, 0).rg;
     vec3  normal0 = unpackNormal(curGD.r);
     float z0      = linearizeDepth(curGD.g);
 
@@ -706,7 +718,7 @@ vec4 JointBilateralFiltering_PT_Vertical(){
 
         if (outScreen(vec2(p) * 2.0 * invViewSize + vec2(1.0, 1.0) * invViewSize)) continue;
 
-        vec2 gd = texelFetch(colortex6, p, 0).rg;
+        vec2 gd = texelFetch(PT_TEX6, p, 0).rg;
         vec3  n  = unpackNormal(gd.r);
         float z  = linearizeDepth(gd.g);
 
@@ -737,7 +749,7 @@ vec4 getGI_PT(float depth, vec3 normal){
         ivec2 curUV = uv + offset;
         if(outScreen(curUV * 2 * invViewSize)) continue;
 
-        vec4 curData = texelFetch(colortex6, curUV, 0);
+        vec4 curData = texelFetch(PT_TEX6, curUV, 0);
         weight *= max(0.0f, mix(1.0, dot(unpackNormal(curData.r), normal), 2.0));
 
         float curZ = linearizeDepth(curData.g);
