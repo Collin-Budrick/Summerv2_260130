@@ -1,8 +1,6 @@
 // https://zhuanlan.zhihu.com/p/525500877
+#define bloomLuminance(color) dot((color), vec3(0.2126, 0.7152, 0.0722))
 vec2 offset = vec2(10.0 * invViewSize.x, 0.0);
-float bloomLuminance(vec3 color) {
-    return dot(color, vec3(0.2126, 0.7152, 0.0722));
-}
 vec4 uvTable[9] = vec4[](
     vec4(0.0, 0.0, 1.0, 1.0),
     vec4(0.0, 0.0, 0.5, 0.5),
