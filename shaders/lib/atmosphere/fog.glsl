@@ -1,6 +1,70 @@
 // 杨超wantnon: iq高度雾注解
 // https://zhuanlan.zhihu.com/p/61138643
 
+#ifdef PROGRAM_VLF
+const ivec3 FOG_FROXEL_DIM = ivec3(16, 9, 16);
+const float FOG_FROXEL_LIGHT_STEP = 10.0;
+const int FOG_FROXEL_LIGHT_SAMPLES = 4;
+
+float sampleFogDensity(vec3 cameraPos, bool doCheaply);
+float computeLightPathOpticalDepth_Fog(vec3 currentPos, vec3 lightWorldDir, float initialStepSize, int N_SAMPLES);
+float GetAttenuationProbability_Fog(float sampleDensity, float secondSpread, float secondIntensity);
+
+vec3 computeFroxelData(ivec3 froxelCoord){
+    vec3 froxelUVW = (vec3(froxelCoord) + 0.5) / vec3(FOG_FROXEL_DIM);
+    vec4 viewPos = screenPosToViewPos(vec4(froxelUVW.xy, exponentialDepth(mix(near, min(shadowDistance, far), froxelUVW.z)), 1.0));
+    vec3 worldPos = viewPosToWorldPos(viewPos).xyz;
+
+    float distanceToCamera = length(viewPos.xyz);
+    bool doCheaply = distanceToCamera > shadowDistance * 0.5;
+    float density = sampleFogDensity(worldPos, doCheaply);
+
+    float visibility = 1.0;
+    if(distanceToCamera < shadowDistance){
+        vec3 shadowPos = getShadowPos(vec4(worldPos, 1.0)).xyz;
+        visibility = texture(shadowtex0, shadowPos).r;
+    }
+
+    float opticalDepth = computeLightPathOpticalDepth_Fog(worldPos, lightWorldDir, FOG_FROXEL_LIGHT_STEP, FOG_FROXEL_LIGHT_SAMPLES);
+    float attenuation = GetAttenuationProbability_Fog(opticalDepth * fogSigmaE, 0.3, 0.4);
+
+    return vec3(density, visibility, attenuation);
+}
+
+vec3 sampleFroxelGrid(vec3 worldPos){
+    vec4 viewPos = vec4(worldPos, 1.0);
+    vec2 uv = viewPosToScreenPos(viewPos).xy;
+    float maxDistance = min(shadowDistance, far);
+    float depthT = saturate(length(viewPos.xyz) / max(maxDistance, 0.0001));
+    vec3 froxelUVW = vec3(clamp(uv, 0.0, 1.0), depthT);
+
+    vec3 scaled = froxelUVW * vec3(FOG_FROXEL_DIM) - 0.5;
+    ivec3 baseCoord = ivec3(clamp(floor(scaled), vec3(0.0), vec3(FOG_FROXEL_DIM) - 1.0));
+    ivec3 maxCoord = FOG_FROXEL_DIM - ivec3(1);
+    vec3 frac = fract(scaled);
+
+    vec3 c000 = computeFroxelData(baseCoord);
+    vec3 c100 = computeFroxelData(min(baseCoord + ivec3(1, 0, 0), maxCoord));
+    vec3 c010 = computeFroxelData(min(baseCoord + ivec3(0, 1, 0), maxCoord));
+    vec3 c110 = computeFroxelData(min(baseCoord + ivec3(1, 1, 0), maxCoord));
+    vec3 c001 = computeFroxelData(min(baseCoord + ivec3(0, 0, 1), maxCoord));
+    vec3 c101 = computeFroxelData(min(baseCoord + ivec3(1, 0, 1), maxCoord));
+    vec3 c011 = computeFroxelData(min(baseCoord + ivec3(0, 1, 1), maxCoord));
+    vec3 c111 = computeFroxelData(min(baseCoord + ivec3(1, 1, 1), maxCoord));
+
+    vec3 c00 = mix(c000, c100, frac.x);
+    vec3 c10 = mix(c010, c110, frac.x);
+    vec3 c01 = mix(c001, c101, frac.x);
+    vec3 c11 = mix(c011, c111, frac.x);
+    vec3 c0 = mix(c00, c10, frac.y);
+    vec3 c1 = mix(c01, c11, frac.y);
+    return mix(c0, c1, frac.z);
+}
+
+float fogVisibility(vec4 worldPos){
+    return saturate(sampleFroxelGrid(worldPos.xyz).y);
+}
+#else
 float fogVisibility(vec4 worldPos){
     float N_SAMPLE = VOLUME_LIGHT_SAMPLES;
 
@@ -24,6 +88,7 @@ float fogVisibility(vec4 worldPos){
 
     return saturate(visibility);
 }
+#endif
 
 float MiePhase_fog(float cos_theta, float g){
     float g2 = g * g;
@@ -145,7 +210,7 @@ float sampleFogDensity(vec3 cameraPos, bool doCheaply){
 
 float computeLightPathOpticalDepth_Fog(vec3 currentPos, vec3 lightWorldDir, float initialStepSize, int N_SAMPLES) {
     float opticalDepth = 0.0;
-    bool doCheaply = false;
+    bool doCheaply = N_SAMPLES <= FOG_FROXEL_LIGHT_SAMPLES;
     float prevDensity = sampleFogDensity(currentPos, doCheaply);
     float currentStepSize = initialStepSize;
 
@@ -154,7 +219,7 @@ float computeLightPathOpticalDepth_Fog(vec3 currentPos, vec3 lightWorldDir, floa
         currentStepSize = mix(initialStepSize, initialStepSize * 5.0, t);
         currentPos += lightWorldDir * currentStepSize;
 
-        // if(i > 0.5 * N_SAMPLES) doCheaply = true;
+        if(i > N_SAMPLES / 2) doCheaply = true;
         float currentDensity = sampleFogDensity(currentPos, doCheaply);
         opticalDepth += 0.5 * (prevDensity + currentDensity) * currentStepSize;
         prevDensity = currentDensity;
@@ -176,22 +241,17 @@ float GetInScatterProbability(float height_fraction, float density){
     return vertical_probability;
 }
 
-vec4 fogLuminance(inout vec4 intScattTrans, vec3 pos, vec3 oriStartPos, float stepSize, float density, float VoL, float iVoL, bool shadow){
+vec4 fogLuminance(inout vec4 intScattTrans, vec3 pos, vec3 oriStartPos, float stepSize, vec3 froxelData, float VoL, float iVoL, bool shadow){
+    float density = froxelData.x;
     float attenuation = 1.0;
     vec4 worldPos = vec4(pos - oriStartPos, 1.0);
     float worldDis = length(worldPos.xyz);
     #if !defined NETHER
         if(shadow){
-            vec4 shadowPos = getShadowPos(worldPos);
-            float shade = 1.0;
-            if(length(worldPos.xyz) < shadowDistance) shade = texture(shadowtex0, shadowPos.xyz).r;
-            attenuation = mix(attenuation, shade, 1.0);
+            attenuation = mix(attenuation, froxelData.y, 1.0);
         }
 
-        float stepSize_l = 10.0;
-        float lightPathOpticalDepth = sampleFogDensity(pos + lightWorldDir * stepSize_l, true);
-        float attenuation_lightPath = GetAttenuationProbability_Fog(lightPathOpticalDepth * fogSigmaE * stepSize_l * 10.0, 0.3, 0.4);
-        attenuation = min(attenuation, attenuation_lightPath);
+        attenuation = min(attenuation, froxelData.z);
     #endif
 
     float height_fraction = getHeightFractionForPoint(pos.y, fogHeight);
@@ -249,6 +309,7 @@ vec4 volumtricFog(vec3 startPos, vec3 worldPos){
     float tLen   = stepDis.y;
     float tEnd   = tStart + tLen;
     float boundary = shadowDistance;
+    float highQualityEnd = min(fogMaxDistance, shadowDistance) * 0.6;
 
     float nearEnd = min(tEnd, boundary);
     float nearLen = max(0.0, nearEnd - tStart);
@@ -260,6 +321,19 @@ vec4 volumtricFog(vec3 startPos, vec3 worldPos){
     vec3 oriStartPos = startPos;
     startPos += worldDir * tStart;
 
+    if(worldDis > highQualityEnd){
+        float cheapLen = max(0.0, tEnd - tStart);
+        vec3 pos = startPos + worldDir * (0.5 * cheapLen);
+        vec3 froxelData = sampleFroxelGrid(pos);
+        if(froxelData.x > 0.001){
+            intScattTrans = fogLuminance(intScattTrans, pos, oriStartPos, cheapLen, froxelData, VoL, iVoL, false);
+        } else {
+            intScattTrans.a *= exp(-fogSigmaE * froxelData.x * cheapLen);
+        }
+        intScattTrans.rgb *= (1.0 - isNightS * 0.75);
+        return intScattTrans;
+    }
+
     if(nNear > 0.01){
         float stepSize = nearLen / float(nNear);
         vec3 stepVec = worldDir * stepSize;
@@ -269,10 +343,10 @@ vec4 volumtricFog(vec3 startPos, vec3 worldPos){
             if(intScattTrans.a < 0.01 || distance(oriStartPos, pos) > stepDis.x + stepDis.y){
                 break;
             }   
-            float density = sampleFogDensity(pos, false);
+            vec3 froxelData = sampleFroxelGrid(pos);
             
-            if(density > 0.001){
-                intScattTrans = fogLuminance(intScattTrans, pos, oriStartPos, stepSize, density, VoL, iVoL, true);
+            if(froxelData.x > 0.001){
+                intScattTrans = fogLuminance(intScattTrans, pos, oriStartPos, stepSize, froxelData, VoL, iVoL, true);
             }
             pos += stepVec;
         }
@@ -289,10 +363,10 @@ vec4 volumtricFog(vec3 startPos, vec3 worldPos){
             if(intScattTrans.a < 0.01 || distance(oriStartPos, pos) > stepDis.x + stepDis.y){
                 break;
             }
-            float density = sampleFogDensity(pos, false);
+            vec3 froxelData = sampleFroxelGrid(pos);
 
-            if(density > 0.001){
-                intScattTrans = fogLuminance(intScattTrans, pos, oriStartPos, stepSize, density, VoL, iVoL, false);
+            if(froxelData.x > 0.001){
+                intScattTrans = fogLuminance(intScattTrans, pos, oriStartPos, stepSize, froxelData, VoL, iVoL, false);
             }
             pos += stepVec;
         }
